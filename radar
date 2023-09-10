@@ -1,0 +1,205 @@
+%Implementation of CA-CFAR technique with help of real data 
+clc;
+clear all;
+close all;
+%Read the .bin file
+retVal = readDCA1000('car.bin');
+%Configuration used while collecting data
+frames=100;
+Receiver_1= retVal(1,:);
+s=size(Receiver_1,2)/frames;
+m_chirps=s/256;
+c = physconst('LightSpeed');
+SampleRate =5000e3;   %5000, 6250 higher parameter values USRR
+ADC_Samples =  256;     %256, 512
+Freq_Slope = 8e12;    %8, 42
+idletime = 3e-6;       %3, 7
+rampendtime = 56e-6;   %56, 87.3
+carrier_frequency = 77e9;
+start_freq = carrier_frequency;
+%Calculation of Range resolution and Doppler Resolution
+rangeres = (c*SampleRate)/(2*Freq_Slope*ADC_Samples);
+dopres = c / (2*start_freq *(idletime +rampendtime) * m_chirps);
+dop_grid=(-64:63)*dopres;
+rng_grid=(1:256)* rangeres;
+
+Nd = 128;                           %number of chirps
+
+%The number of samples on each chirp. 
+Nr = 256;
+s=size(Receiver_1,2)/frames;
+m_chirps=s/256;
+Receiver_1=reshape(Receiver_1,s,frames);
+
+for j=1:100% Selected frame number
+      A=Receiver_1( :, j);
+      B( :, :, j)=reshape(A,256,m_chirps);
+      sig_fft = fft(B( :, :, j), Nr);
+      sig_fft = abs(sig_fft);   
+      
+figure(3);
+% Plot FFT output 
+plot(rng_grid,pulsint(sig_fft)); 
+xlabel('measured range [m]');
+ylabel('amplitude'); 
+hold on
+pause (0.1);
+% 2D FFT using the FFT size for both dimensions.
+sig_fft2 = fft2(B( :, :, j), Nr, Nd);
+sig_fft2 = fftshift(sig_fft2,2);
+RangeDopM = abs(sig_fft2);
+RangeDopM = 10*log10(RangeDopM(:,1:2:end));
+
+% Use the imagesc function to plot the output of 2DFFT and to show axis
+% in both dimensions.
+
+figure(1);
+imagesc(dop_grid,rng_grid, RangeDopM);
+xlabel('measured velocity [m/s]');
+ylabel('measured range [m]'); 
+hold on
+pause(0.5)
+RangeDopM(:,(64/2)+1)=0;
+Nd1=64;
+
+%% CFAR implementation
+
+% Slide Window through the complete Range Doppler Map
+
+
+Tr =10;%training cells in both dimension
+Td = 10;%training cells in both dimension
+
+
+Gr = 2;%guard cells in both dimensions
+Gd = 2;%guard cells in both dimensions
+
+% Offset the threshold by SNR value in dB
+offset = 4.7;
+
+%Create a vector to store noise_level for each iteration on training cells
+doppler_cells   = Td + Gd;  % no. of doppler cells on either side of CUT
+range_cells     = Tr + Gr;  % no. of range cells on either side of CUT
+
+range_cells_1     = Nr/2 - 2*doppler_cells; % no. of range dimension cells
+doppler_cells_1   = Nd1   - 2*range_cells;   % no. of doppler dim. cells
+
+matrix_size        = (2*Tr + 2*Gr + 1) * (2*Td + 2*Gd + 1);
+guard_cut_cells = (2*Gr+1) * (2*Gd+1);     % no. guards + cell-under-test
+train_cells     = matrix_size - guard_cut_cells;  % no. of training cells
+
+noise_level      = zeros(range_cells_1, doppler_cells_1);
+
+cfar_signal = zeros(size(RangeDopM )); % create a matrix to save the 
+
+% CReating a loop that  slides the CUT across ran ge doppler map by
+% giving margins at the edges for Training and Guard Cells.
+r_min = range_cells + 1;
+r_max = range_cells_1 - range_cells;
+
+d_min = doppler_cells + 1;
+d_max = doppler_cells_1 - doppler_cells;
+% Applying CFAR technique to obtain the sum of the training cells
+for r = r_min : r_max
+    for d = d_min : d_max
+        cell_under_test = RangeDopM(r, d);
+        
+        cell_count = 0;
+        for delta_r = -range_cells : range_cells
+            for delta_d = -doppler_cells : doppler_cells
+                
+                cr = r + delta_r;
+                cd = d + delta_d;
+                
+                valid_range = (cr >= 1) && (cd >= 1) && (cr < range_cells_1) && (cd < doppler_cells_1);
+                train_cell = abs(delta_r) > Gr || abs(delta_d) > Gd;
+                
+                if valid_range && train_cell
+                    noise = db2pow(RangeDopM (cr, cd));% db to power conversion
+                    noise_level(r, d) = noise_level(r, d) + noise;
+                    cell_count = cell_count + 1;
+                end
+               
+            end
+        end
+
+        % If the signal in the cell under test (CUT) exceeds the
+        % threshold, then it is marked as 1.
+        threshold = pow2db(noise_level(r, d) / cell_count) + offset;
+
+        if (cell_under_test >= threshold)
+            cfar_signal(r, d) = RangeDopM (r, d); % ... or set to 1
+        end
+        
+    end
+end
+
+
+
+% Display the CFAR output using the imagesc function like we did for Range
+% Doppler Response output.
+figure(2);
+imagesc(dop_grid,rng_grid, cfar_signal);
+xlabel('velocity [m/s]');
+ylabel('range [m]');
+zlabel('signal strength [dB]')
+title(sprintf('CA-CFAR filtered Range Doppler Response (threshold=%d dB)', offset))
+colorbar;
+hold on
+pause(0.5)
+
+end
+function [retVal] = readDCA1000(car)
+%% global variables
+% change based on sensor config
+numADCSamples = 512; % number of ADC samples per chirp
+numADCBits = 16; % number of ADC bits per sample
+numRX = 4; % number of receivers
+numLanes = 2; % do not change. number of lanes is always 2
+isReal = 0; % set to 1 if real only data, 0 if complex data0
+%% read file
+% read .bin file
+fid = fopen(car,'r');
+adcData = fread(fid, 'int16');
+% if 12 or 14 bits ADC per sample compensate for sign extension
+if numADCBits ~= 16
+l_max = 2^(numADCBits-1)-1;
+adcData(adcData > l_max) = adcData(adcData > l_max) - 2^numADCBits;
+end
+fclose(fid);
+fileSize = size(adcData, 1);
+% real data reshape, filesize = numADCSamples*numChirps
+if isReal
+numChirps = fileSize/numADCSamples/numRX;
+LVDS = zeros(1, fileSize);
+%create column for each chirp
+LVDS = reshape(adcData, numADCSamples*numRX, numChirps);
+%each row is data from one chirp
+LVDS = LVDS.';
+else
+% for complex data
+% filesize = 2 * numADCSamples*numChirps
+numChirps = fileSize/2/numADCSamples/numRX;
+LVDS = zeros(1, fileSize/2);
+%combine real and imaginary part into complex data
+%read in file: 2I is followed by 2Q
+counter = 1;
+for i=1:4:fileSize-1
+LVDS(1,counter) = adcData(i) + sqrt(-1)*adcData(i+2); LVDS(1,counter+1) = adcData(i+1)+sqrt(-1)*adcData(i+3);
+counter = counter + 2;
+end
+% create column for each chirp
+LVDS = reshape(LVDS, numADCSamples*numRX, numChirps);
+%each row is data from one chirp
+LVDS = LVDS.';
+end
+%organize data per RX
+adcData = zeros(numRX,numChirps*numADCSamples);
+for row = 1:numRX
+ for i = 1: numChirps
+    adcData(row, (i-1)*numADCSamples+1:i*numADCSamples) = LVDS(i, (row-1)*numADCSamples+1:row*numADCSamples);
+ end
+end
+% return receiver data
+retVal=adcData;
+end
